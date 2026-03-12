@@ -27,6 +27,8 @@ def get_processes():
 if page == "CSVアップロード":
     st.header("CSVアップロード")
 
+    st.info("アップロードしたデータはデータベースに保存されます。同じプロセス名で再アップロードすると既存データは上書きされます。")
+
     uploaded_file = st.file_uploader("CSVファイルを選択", type=["csv"])
     process_name = st.text_input("プロセス名", placeholder="例: 営業事務")
 

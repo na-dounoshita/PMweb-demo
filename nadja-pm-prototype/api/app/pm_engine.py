@@ -48,7 +48,9 @@ def discover_dfg(engine, process_id: int) -> dict:
         avg_dur = None
         perf_val = perf_dfg.get((src, dst))
         if perf_val is not None:
-            # perf_dfgの値は平均秒数（float）
+            # pm4pyバージョンにより float or dict（{"mean": ..., ...}）が返る
+            if isinstance(perf_val, dict):
+                perf_val = perf_val.get("mean", 0)
             avg_dur = round(float(perf_val), 1)
         edges.append({
             "from": src,

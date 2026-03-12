@@ -69,7 +69,7 @@ def import_csv(engine, file_bytes: bytes, process_name: str) -> dict:
         # イベント挿入
         insert_sql = text("""
             INSERT INTO event (case_id, activity_name, event_timestamp, process_id, source_system, event_attrs)
-            VALUES (:case_id, :activity_name, :event_timestamp, :process_id, :source_system, :event_attrs::jsonb)
+            VALUES (:case_id, :activity_name, :event_timestamp, :process_id, :source_system, CAST(:event_attrs AS jsonb))
         """)
 
         records = []
