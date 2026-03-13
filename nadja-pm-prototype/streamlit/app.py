@@ -1,5 +1,7 @@
+import io
 import os
 
+import pandas as pd
 import plotly.express as px
 import requests
 import streamlit as st
@@ -32,10 +34,30 @@ if page == "CSVアップロード":
     uploaded_file = st.file_uploader("CSVファイルを選択", type=["csv"])
     process_name = st.text_input("プロセス名", placeholder="例: 営業事務")
 
+    time_gap_minutes = None
+    if uploaded_file is not None:
+        header_df = pd.read_csv(io.BytesIO(uploaded_file.getvalue()), encoding="utf-8-sig", nrows=0)
+        has_case_id = "CaseID" in header_df.columns
+
+        if not has_case_id:
+            st.warning("CSVにCaseIDカラムがありません。タイムギャップ閾値を指定してケースIDを自動生成します。")
+            time_gap_minutes = st.number_input(
+                "タイムギャップ閾値（分）",
+                min_value=1,
+                max_value=1440,
+                value=30,
+                step=5,
+                help="この時間以上の間隔があると新しいケースとして分割されます",
+            )
+        else:
+            st.info("CaseIDカラムが検出されました。既存のケースIDを使用します。")
+
     if st.button("アップロード", disabled=not (uploaded_file and process_name)):
         with st.spinner("インポート中..."):
             files = {"file": (uploaded_file.name, uploaded_file.getvalue(), "text/csv")}
             data = {"process_name": process_name}
+            if time_gap_minutes is not None:
+                data["time_gap_minutes"] = str(time_gap_minutes)
             try:
                 resp = requests.post(
                     f"{API_URL}/api/v1/upload/csv", files=files, data=data, timeout=60

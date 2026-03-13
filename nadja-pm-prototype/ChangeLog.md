@@ -4,6 +4,24 @@
 
 ---
 
+## 2026-03-12 (3)
+
+### やったこと
+
+- CaseIDカラムが無いCSVに対応するため、タイムギャップ閾値によるケースID自動生成機能を追加
+  - `importer.py`: `_generate_case_ids()` 関数を追加。Timestamp順にソートし、閾値超のギャップで新ケースに分割。ID形式は `YYYYMMDD_001`
+  - `importer.py`: `import_csv()` に `time_gap_minutes` パラメータ追加。CaseIDカラム有無を自動判定
+  - `main.py`: `/api/v1/upload/csv` エンドポイントに `time_gap_minutes` Formパラメータ追加
+  - `streamlit/app.py`: ファイルアップロード時にCSVヘッダーを解析し、CaseIDカラムの有無に応じて閾値入力UI（number_input、デフォルト30分）を動的表示
+
+### 現在の状態
+
+- CaseIDカラム有りCSV → 従来通り動作
+- CaseIDカラム無しCSV → 閾値を指定してケースIDを自動生成し、DFG・KPI分析可能
+- 必須カラムは Activity と Timestamp のみ（CaseIDは任意に変更）
+
+---
+
 ## 2026-03-12 (2)
 
 ### やったこと

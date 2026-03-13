@@ -32,14 +32,18 @@ def list_processes():
 
 
 @app.post("/api/v1/upload/csv")
-async def upload_csv(file: UploadFile = File(...), process_name: str = Form(...)):
+async def upload_csv(
+    file: UploadFile = File(...),
+    process_name: str = Form(...),
+    time_gap_minutes: int | None = Form(None),
+):
     if not file.filename or not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="CSVファイルを指定してください")
 
     contents = await file.read()
 
     try:
-        result = import_csv(engine, contents, process_name)
+        result = import_csv(engine, contents, process_name, time_gap_minutes=time_gap_minutes)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

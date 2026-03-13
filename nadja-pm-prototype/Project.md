@@ -112,7 +112,9 @@ docker compose down -v
 
 | 操作 | 何が起きるか |
 |------|-------------|
-| 「CSVファイルを選択」にファイルをドラッグ or クリック | CSVファイルが読み込まれる（`.csv` のみ受付） |
+| 「CSVファイルを選択」にファイルをドラッグ or クリック | CSVファイルが読み込まれる（`.csv` のみ受付）。ヘッダーを自動解析し、CaseIDカラムの有無を検出 |
+| CaseIDカラムが無い場合 → 「タイムギャップ閾値（分）」入力 | 1〜1440分の範囲で設定（デフォルト30分、ステップ5分）。この時間以上の間隔があると新しいケースとして分割 |
+| CaseIDカラムがある場合 → info表示 | 既存のケースIDを使用する旨を表示 |
 | 「プロセス名」テキスト欄に入力 | 分析対象のプロセス名を設定（例: `営業事務`） |
 | **「アップロード」ボタン** | ファイルとプロセス名の**両方が揃うまでグレーアウト**。押すとCSVをAPIに送信→PostgreSQLに格納。成功時は「インポートイベント数」と「ケース数」を表示。失敗時はエラーメッセージを表示 |
 
@@ -153,7 +155,8 @@ docker compose down -v
 
 ## メモ
 
-- CSVの固定3カラム（CaseID, Activity, Timestamp）以外は `event_attrs JSONB` に格納。カラム追加時にスキーマ変更不要
+- CSVにCaseIDカラムが無い場合、タイムギャップ閾値（分単位、UI上で選択可能）でケースIDを自動生成。閾値を超える間隔があると新しいケースとして分割
+- CSVの固定3カラム（CaseID, Activity, Timestamp）のうち、CaseIDは任意。Activity, Timestamp以外は `event_attrs JSONB` に格納。カラム追加時にスキーマ変更不要
 - 同一プロセスへの再アップロードは既存データを削除して上書き（プロトタイプ仕様）
 - Streamlitコンテナにpm4pyは不要。APIが返すJSONからGraphviz DOTを生成して描画
 - PostgreSQLの `healthcheck` + `condition: service_healthy` でAPI起動順序を保証
