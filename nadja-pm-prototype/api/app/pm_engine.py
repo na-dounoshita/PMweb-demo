@@ -26,6 +26,29 @@ def load_event_log(engine, process_id: int) -> pd.DataFrame:
     return df
 
 
+def _compute_critical_path(freq_dfg: dict, start_acts: dict, end_acts: dict) -> list:
+    """最高頻度のエッジを辿ってクリティカルパスを特定する"""
+    adj: dict[str, tuple[str, int]] = {}
+    for (src, dst), count in freq_dfg.items():
+        if src not in adj or count > adj[src][1]:
+            adj[src] = (dst, count)
+
+    if not start_acts:
+        return []
+    best_start = max(start_acts.items(), key=lambda x: x[1])[0]
+    path_edges = []
+    visited: set[str] = set()
+    current = best_start
+    while current in adj and current not in visited:
+        visited.add(current)
+        next_node, _ = adj[current]
+        path_edges.append({"from": current, "to": next_node})
+        if next_node in end_acts:
+            break
+        current = next_node
+    return path_edges
+
+
 def discover_dfg(engine, process_id: int) -> dict:
     """DFG（Directly-Follows Graph）を生成する"""
     df = load_event_log(engine, process_id)
@@ -59,11 +82,14 @@ def discover_dfg(engine, process_id: int) -> dict:
             "avg_duration_sec": avg_dur,
         })
 
+    critical_path = _compute_critical_path(freq_dfg, start_acts, end_acts)
+
     return {
         "nodes": nodes,
         "edges": edges,
         "start_activities": list(start_acts.keys()),
         "end_activities": list(end_acts.keys()),
+        "critical_path_edges": critical_path,
     }
 
 
