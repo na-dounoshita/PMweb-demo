@@ -85,13 +85,13 @@ def import_csv(engine, file_bytes: bytes, process_name: str, time_gap_minutes: i
 
         if row:
             process_id = row[0]
-            # 既存データ削除（再アップロード = 上書き）
+            # 既存データ削除（再アップロード = 上書き）— eventを先に削除
             conn.execute(
-                text("DELETE FROM case_instance WHERE process_id = :pid"),
+                text("DELETE FROM event WHERE process_id = :pid"),
                 {"pid": process_id},
             )
             conn.execute(
-                text("DELETE FROM event WHERE process_id = :pid"),
+                text("DELETE FROM case_instance WHERE process_id = :pid"),
                 {"pid": process_id},
             )
         else:

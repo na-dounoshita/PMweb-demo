@@ -4,6 +4,33 @@
 
 ---
 
+## 2026-03-17
+
+### やったこと
+
+- 「業務マッピング」ページを新規追加（4ページ目）
+  - 自動生成DFGをベースに、ノード・エッジを手動で追加/削除/編集できる機能
+  - vis.js `manipulation` モードによる組み込み編集UI（ノード追加・エッジ追加・ダブルクリックで名前変更・削除）
+  - vis.jsキャンバス内の「保存」ボタンからFastAPIに直接`fetch()`で保存（Streamlitの双方向通信制限を回避）
+- DB: `process_map` テーブル追加（nodes/edges を JSONB で保存）
+- API: `map_routes.py` 新規作成（7エンドポイント: CRUD + DFG→マップ変換 + エクスポート + インポート）
+  - マップ保存（upsert）、一覧、取得、削除
+  - DFGをマップとして保存（`/api/v1/maps/from-dfg`）
+  - JSONエクスポート（`/api/v1/maps/{id}/export`）
+  - インポート: JSON形式とCSV形式（`From,To,Label`）を自動判定
+- `main.py` に CORSミドルウェア追加（ブラウザ→API直接アクセス対応）
+- `docker-compose.yml` に `PUBLIC_API_URL` 環境変数追加
+
+### 現在の状態
+
+- 4ページ構成: CSVアップロード / プロセスマップ（DFG） / 業務マッピング / KPIダッシュボード
+- 既存の「プロセスマップ」ページは変更なし（Auto DFG読み取り専用）
+- 「業務マッピング」ページで手動編集 → DB保存 → 再読み込みで復元が可能
+- JSON/CSVでマップのエクスポート/インポートが可能
+- `docker compose down -v && docker compose up --build` で再構築が必要（init.sql変更のため）
+
+---
+
 ## 2026-03-13 (2)
 
 ### やったこと

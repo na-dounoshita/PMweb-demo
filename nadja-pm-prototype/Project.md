@@ -20,21 +20,22 @@ nadja-pm-prototype/
 ├── docker compose.yml          # コンテナオーケストレーション
 │
 ├── [DB]
-│   └── db/init.sql             # スキーマDDL（3テーブル + インデックス）
+│   └── db/init.sql             # スキーマDDL（4テーブル + インデックス）
 │
 ├── [API]
 │   ├── api/Dockerfile
 │   ├── api/requirements.txt
 │   └── api/app/
-│       ├── main.py             # FastAPIエンドポイント（5本）
+│       ├── main.py             # FastAPIエンドポイント（5本 + マップAPI）
 │       ├── db.py               # SQLAlchemy接続
 │       ├── importer.py         # CSVインポートロジック
-│       └── pm_engine.py        # pm4py分析ラッパー
+│       ├── pm_engine.py        # pm4py分析ラッパー
+│       └── map_routes.py       # 業務マッピングCRUD API
 │
 ├── [フロントエンド]
 │   ├── streamlit/Dockerfile
 │   ├── streamlit/requirements.txt
-│   └── streamlit/app.py        # Streamlit 3ページ構成
+│   └── streamlit/app.py        # Streamlit 4ページ構成
 │
 └── [設計書]
     ├── NADJA_PM_Web_Prototype_Spec.md
@@ -45,7 +46,7 @@ nadja-pm-prototype/
 
 ```
 ┌──────────────────┐
-│  Streamlit       │  ブラウザUI（3ページ）
+│  Streamlit       │  ブラウザUI（4ページ）
 │  :8501           │  requests で API を呼び出し
 └────────┬─────────┘
          │ HTTP
@@ -55,7 +56,7 @@ nadja-pm-prototype/
 └────────┬─────────┘
          │ SQLAlchemy
 ┌────────▼─────────┐
-│  PostgreSQL 16   │  event / case_instance / process_definition
+│  PostgreSQL 16   │  event / case_instance / process_definition / process_map
 │  :5432           │  event_attrs JSONB で柔軟なカラム対応
 └──────────────────┘
 ```
@@ -92,12 +93,12 @@ docker compose down -v
 
 ## 画面操作ガイド
 
-アプリは **3ページ構成**。左サイドバーのラジオボタンでページを切り替える。
+アプリは **4ページ構成**。左サイドバーのラジオボタンでページを切り替える。
 
 ### 全体の操作フロー
 
 ```
-① CSVアップロード → ② プロセスマップで業務フロー確認 → ③ KPIダッシュボードで数値確認
+① CSVアップロード → ② プロセスマップで業務フロー確認 → ③ 業務マッピングで手動編集 → ④ KPIダッシュボードで数値確認
 ```
 
 ### サイドバー（共通）
@@ -106,6 +107,7 @@ docker compose down -v
 |------|------|
 | ラジオボタン「CSVアップロード」 | アップロード画面に切り替え |
 | ラジオボタン「プロセスマップ」 | DFG可視化画面に切り替え |
+| ラジオボタン「業務マッピング」 | 手動編集可能なマップ画面に切り替え |
 | ラジオボタン「KPIダッシュボード」 | KPI画面に切り替え |
 
 ### ページ1: CSVアップロード
@@ -150,7 +152,22 @@ docker compose down -v
 | 橙ノード | 開始かつ終了アクティビティ |
 | 青灰ノード | 中間アクティビティ |
 
-### ページ3: KPIダッシュボード
+### ページ3: 業務マッピング
+
+| 操作 | 何が起きるか |
+|------|-------------|
+| ページを開く | 登録済みプロセスを自動取得。サイドバーでプロセスを選択 |
+| **「DFGをマップとして保存」ボタン** | 自動生成DFGを編集可能なマップとしてDBに保存 |
+| **マップ選択ドロップダウン** | 保存済みマップを選択して編集キャンバスに表示 |
+| vis.jsツールバー「ノード追加」 | キャンバスをクリックしてノード名を入力し配置 |
+| vis.jsツールバー「エッジ追加」 | ノード間をドラッグして遷移を作成 |
+| ノードをダブルクリック | ノード名を変更 |
+| 選択してDeleteキー or ツールバー「削除」 | ノード/エッジを削除 |
+| **「💾 保存」ボタン（キャンバス内）** | 編集内容をFastAPI経由でDBに保存 |
+| **「JSONエクスポート」/「CSVエクスポート」** | マップをファイルとしてダウンロード |
+| **「JSONインポート」/「CSVインポート」** | ファイルからマップを読み込み。CSV形式は `From,To,Label` 列 |
+
+### ページ4: KPIダッシュボード
 
 | 操作 | 何が起きるか |
 |------|-------------|

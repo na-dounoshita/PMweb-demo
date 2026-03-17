@@ -1,3 +1,4 @@
+import csv
 import io
 import json
 import os
@@ -10,11 +11,12 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 API_URL = os.environ.get("API_URL", "http://localhost:8000")
+PUBLIC_API_URL = os.environ.get("PUBLIC_API_URL", "http://localhost:8000")
 
 st.set_page_config(page_title="NADJA PM", page_icon="📊", layout="wide")
 st.sidebar.title("NADJA Process Mining")
 
-page = st.sidebar.radio("ページ選択", ["CSVアップロード", "プロセスマップ", "KPIダッシュボード"])
+page = st.sidebar.radio("ページ選択", ["CSVアップロード", "プロセスマップ", "業務マッピング", "KPIダッシュボード"])
 
 
 def format_duration(seconds: float | None) -> str:
@@ -373,7 +375,350 @@ document.addEventListener("DOMContentLoaded", function() {{
             st.error(f"通信エラー: {e}")
 
 
-# ===== ページ3: KPIダッシュボード =====
+# ===== ページ3: 業務マッピング =====
+
+elif page == "業務マッピング":
+    st.header("業務マッピング")
+
+    processes = get_processes()
+    if not processes:
+        st.info("プロセスが登録されていません。先にCSVをアップロードしてください。")
+    else:
+        proc_options = {p["process_name"]: p["process_id"] for p in processes}
+        selected_proc = st.sidebar.selectbox("プロセス選択", list(proc_options.keys()), key="map_proc")
+        map_process_id = proc_options[selected_proc]
+
+        # --- マップ一覧取得 ---
+        try:
+            maps_resp = requests.get(
+                f"{API_URL}/api/v1/maps", params={"process_id": map_process_id}, timeout=10
+            )
+            maps_resp.raise_for_status()
+            maps_list = maps_resp.json()
+        except Exception:
+            maps_list = []
+
+        st.sidebar.divider()
+        st.sidebar.subheader("マップ操作")
+
+        # --- DFGをマップとして保存 ---
+        dfg_map_name = st.sidebar.text_input("マップ名", value="default", key="dfg_map_name")
+        if st.sidebar.button("DFGをマップとして保存"):
+            try:
+                resp = requests.post(
+                    f"{API_URL}/api/v1/maps/from-dfg",
+                    json={"process_id": map_process_id, "map_name": dfg_map_name},
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                st.sidebar.success(resp.json().get("message", "保存しました"))
+                st.rerun()
+            except requests.exceptions.HTTPError as e:
+                detail = e.response.json().get("detail", str(e)) if e.response else str(e)
+                st.sidebar.error(detail)
+
+        # --- インポート ---
+        st.sidebar.divider()
+        st.sidebar.subheader("インポート")
+        import_file = st.sidebar.file_uploader("JSON / CSV ファイル", type=["json", "csv"], key="map_import")
+        import_map_name = st.sidebar.text_input("インポート先マップ名", value="imported", key="import_name")
+        if st.sidebar.button("インポート実行") and import_file:
+            try:
+                files = {"file": (import_file.name, import_file.getvalue(), "application/octet-stream")}
+                data = {"process_id": str(map_process_id), "map_name": import_map_name}
+                resp = requests.post(
+                    f"{API_URL}/api/v1/maps/import", files=files, data=data, timeout=30
+                )
+                resp.raise_for_status()
+                st.sidebar.success(resp.json().get("message", "インポートしました"))
+                st.rerun()
+            except requests.exceptions.HTTPError as e:
+                detail = e.response.json().get("detail", str(e)) if e.response else str(e)
+                st.sidebar.error(detail)
+
+        # --- マップ選択 & 表示 ---
+        if not maps_list:
+            st.info("保存済みマップがありません。「DFGをマップとして保存」またはファイルをインポートしてください。")
+        else:
+            map_options = {f"{m['map_name']} ({m['source']})": m["map_id"] for m in maps_list}
+            selected_map_label = st.selectbox("マップ選択", list(map_options.keys()))
+            selected_map_id = map_options[selected_map_label]
+
+            # マップデータ取得
+            try:
+                map_resp = requests.get(f"{API_URL}/api/v1/maps/{selected_map_id}", timeout=10)
+                map_resp.raise_for_status()
+                map_data = map_resp.json()
+            except Exception as e:
+                st.error(f"マップ取得エラー: {e}")
+                map_data = None
+
+            if map_data:
+                map_nodes = map_data["nodes"]
+                map_edges = map_data["edges"]
+
+                # --- エクスポート ---
+                col_exp1, col_exp2, col_exp3 = st.columns([1, 1, 2])
+                with col_exp1:
+                    export_json = json.dumps({
+                        "format_version": "1.0",
+                        "process_name": selected_proc,
+                        "map_name": map_data["map_name"],
+                        "nodes": map_nodes,
+                        "edges": map_edges,
+                        "metadata": map_data.get("metadata"),
+                    }, ensure_ascii=False, indent=2)
+                    st.download_button(
+                        "JSONエクスポート",
+                        data=export_json,
+                        file_name=f"map_{selected_map_id}.json",
+                        mime="application/json",
+                    )
+                with col_exp2:
+                    # CSVエクスポート
+                    csv_buf = io.StringIO()
+                    writer = csv.writer(csv_buf)
+                    writer.writerow(["From", "To", "Label"])
+                    for edge in map_edges:
+                        writer.writerow([edge.get("from", ""), edge.get("to", ""), edge.get("label", "")])
+                    st.download_button(
+                        "CSVエクスポート",
+                        data=csv_buf.getvalue(),
+                        file_name=f"map_{selected_map_id}.csv",
+                        mime="text/csv",
+                    )
+                with col_exp3:
+                    if st.button("このマップを削除", type="secondary"):
+                        try:
+                            del_resp = requests.delete(f"{API_URL}/api/v1/maps/{selected_map_id}", timeout=10)
+                            del_resp.raise_for_status()
+                            st.success("マップを削除しました")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"削除エラー: {e}")
+
+                # --- vis.js 編集可能キャンバス ---
+                node_colors = {
+                    "start": {"background": "#4CAF50", "border": "#2E7D32"},
+                    "end": {"background": "#F44336", "border": "#C62828"},
+                    "both": {"background": "#FF9800", "border": "#E65100"},
+                    "intermediate": {"background": "#78909C", "border": "#546E7A"},
+                }
+
+                vis_nodes = []
+                for n in map_nodes:
+                    ntype = n.get("type", "intermediate")
+                    color = node_colors.get(ntype, node_colors["intermediate"])
+                    freq = n.get("frequency")
+                    label = n.get("label", n.get("id", ""))
+                    if freq:
+                        label = f"{label}\n({freq})"
+                    vis_nodes.append({
+                        "id": n.get("id", n.get("label")),
+                        "label": label,
+                        "x": n.get("x", 0),
+                        "y": n.get("y", 0),
+                        "color": color,
+                        "shape": "box",
+                        "borderWidth": 2,
+                        "font": {"size": 14, "color": "#FFFFFF"},
+                        "type": ntype,
+                    })
+
+                vis_edges = []
+                for e in map_edges:
+                    elabel = e.get("label", "")
+                    freq = e.get("frequency")
+                    avg_dur = e.get("avg_duration_sec")
+                    if freq and not elabel:
+                        parts = [str(freq)]
+                        if avg_dur is not None:
+                            parts.append(f"({format_duration(avg_dur)})")
+                        elabel = " ".join(parts)
+                    vis_edges.append({
+                        "id": e.get("id", f"{e.get('from', '')}_{e.get('to', '')}"),
+                        "from": e.get("from", ""),
+                        "to": e.get("to", ""),
+                        "label": elabel,
+                        "arrows": "to",
+                        "color": {"color": "#999999"},
+                        "font": {"size": 11, "align": "horizontal", "background": "white"},
+                        "smooth": {"type": "curvedCW", "roundness": 0.15},
+                    })
+
+                nodes_json = json.dumps(vis_nodes, ensure_ascii=False)
+                edges_json = json.dumps(vis_edges, ensure_ascii=False)
+
+                vis_html = f"""<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
+<style>
+  html, body {{ margin:0; padding:0; width:100%; height:100%; overflow:hidden; font-family:sans-serif; }}
+  #graph {{ width:100%; height:580px; border:1px solid #ddd; }}
+  #toolbar {{ padding:8px; display:flex; gap:8px; align-items:center; }}
+  #toolbar button {{ padding:6px 16px; border:1px solid #ccc; border-radius:4px; cursor:pointer;
+                     background:#fff; font-size:13px; }}
+  #toolbar button:hover {{ background:#f0f0f0; }}
+  #toolbar button.primary {{ background:#1976D2; color:#fff; border-color:#1565C0; }}
+  #toolbar button.primary:hover {{ background:#1565C0; }}
+  #toast {{ position:fixed; top:12px; right:12px; padding:10px 20px; border-radius:6px;
+            color:#fff; font-size:14px; display:none; z-index:9999; }}
+  #toast.success {{ background:#4CAF50; }}
+  #toast.error {{ background:#F44336; }}
+</style>
+</head><body>
+<div id="toolbar">
+  <button class="primary" onclick="saveMap()">💾 保存</button>
+  <button onclick="exportJSON()">📥 JSONエクスポート</button>
+  <span style="color:#888; font-size:12px;">ツールバーの「ノード追加」「エッジ追加」「削除」で編集 / ダブルクリックで名前変更</span>
+</div>
+<div id="graph"></div>
+<div id="toast"></div>
+<script>
+var PUBLIC_API_URL = "{PUBLIC_API_URL}";
+var PROCESS_ID = {map_process_id};
+var MAP_NAME = "{map_data['map_name']}";
+var MAP_ID = {selected_map_id};
+
+var nodes = new vis.DataSet({nodes_json});
+var edges = new vis.DataSet({edges_json});
+var container = document.getElementById("graph");
+
+var options = {{
+  manipulation: {{
+    enabled: true,
+    addNode: function(nodeData, callback) {{
+      var name = prompt("ノード名を入力:", "新規アクティビティ");
+      if (name) {{
+        nodeData.id = name;
+        nodeData.label = name;
+        nodeData.shape = "box";
+        nodeData.color = {{background: "#78909C", border: "#546E7A"}};
+        nodeData.font = {{size: 14, color: "#FFFFFF"}};
+        nodeData.borderWidth = 2;
+        nodeData.type = "intermediate";
+        callback(nodeData);
+      }}
+    }},
+    editNode: function(nodeData, callback) {{
+      var newName = prompt("ノード名を変更:", nodeData.label.split("\\n")[0]);
+      if (newName !== null) {{
+        nodeData.label = newName;
+        nodeData.id = newName;
+        callback(nodeData);
+      }} else {{
+        callback(null);
+      }}
+    }},
+    addEdge: function(edgeData, callback) {{
+      if (edgeData.from !== edgeData.to) {{
+        edgeData.arrows = "to";
+        edgeData.color = {{color: "#999999"}};
+        edgeData.font = {{size: 11, align: "horizontal", background: "white"}};
+        edgeData.smooth = {{type: "curvedCW", roundness: 0.15}};
+        edgeData.id = edgeData.from + "_" + edgeData.to + "_" + Date.now();
+        callback(edgeData);
+      }}
+    }},
+    deleteNode: function(data, callback) {{
+      if (confirm("選択したノードを削除しますか？")) callback(data);
+      else callback(null);
+    }},
+    deleteEdge: function(data, callback) {{
+      if (confirm("選択したエッジを削除しますか？")) callback(data);
+      else callback(null);
+    }}
+  }},
+  physics: {{ enabled: false }},
+  interaction: {{ hover: true, zoomView: true, dragView: true, dragNodes: true, tooltipDelay: 100 }}
+}};
+
+var network = new vis.Network(container, {{nodes: nodes, edges: edges}}, options);
+network.once("afterDrawing", function() {{ network.fit({{ animation: false }}); }});
+
+function showToast(msg, type) {{
+  var t = document.getElementById("toast");
+  t.textContent = msg;
+  t.className = type;
+  t.style.display = "block";
+  setTimeout(function() {{ t.style.display = "none"; }}, 3000);
+}}
+
+function getGraphData() {{
+  var positions = network.getPositions();
+  var nodeData = nodes.get().map(function(n) {{
+    var pos = positions[n.id] || {{x: n.x || 0, y: n.y || 0}};
+    return {{
+      id: n.id,
+      label: (n.label || "").split("\\n")[0],
+      x: Math.round(pos.x),
+      y: Math.round(pos.y),
+      type: n.type || "intermediate"
+    }};
+  }});
+  var edgeData = edges.get().map(function(e) {{
+    return {{
+      id: e.id,
+      from: e.from,
+      to: e.to,
+      label: e.label || ""
+    }};
+  }});
+  return {{nodes: nodeData, edges: edgeData}};
+}}
+
+function saveMap() {{
+  var data = getGraphData();
+  fetch(PUBLIC_API_URL + "/api/v1/maps", {{
+    method: "POST",
+    headers: {{"Content-Type": "application/json"}},
+    body: JSON.stringify({{
+      process_id: PROCESS_ID,
+      map_name: MAP_NAME,
+      source: "manual",
+      nodes: data.nodes,
+      edges: data.edges
+    }})
+  }}).then(function(r) {{ return r.json(); }})
+    .then(function(res) {{ showToast(res.message || "保存しました", "success"); }})
+    .catch(function(err) {{ showToast("保存エラー: " + err, "error"); }});
+}}
+
+function exportJSON() {{
+  var data = getGraphData();
+  var exportObj = {{
+    format_version: "1.0",
+    process_name: "{selected_proc}",
+    map_name: MAP_NAME,
+    nodes: data.nodes,
+    edges: data.edges,
+    metadata: {{}}
+  }};
+  var blob = new Blob([JSON.stringify(exportObj, null, 2)], {{type: "application/json"}});
+  var a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "map_" + MAP_ID + ".json";
+  a.click();
+}}
+</script>
+</body></html>"""
+                components.html(vis_html, height=650, scrolling=False)
+
+                st.markdown(
+                    """
+                    <div style="display:flex; gap:16px; flex-wrap:wrap; padding:8px 0; font-size:14px;">
+                        <span><span style="background:#4CAF50; color:white; padding:2px 8px; border-radius:4px;">■</span> 開始</span>
+                        <span><span style="background:#F44336; color:white; padding:2px 8px; border-radius:4px;">■</span> 終了</span>
+                        <span><span style="background:#FF9800; color:white; padding:2px 8px; border-radius:4px;">■</span> 開始+終了</span>
+                        <span><span style="background:#78909C; color:white; padding:2px 8px; border-radius:4px;">■</span> 中間</span>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+
+# ===== ページ4: KPIダッシュボード =====
 
 elif page == "KPIダッシュボード":
     st.header("KPIダッシュボード")

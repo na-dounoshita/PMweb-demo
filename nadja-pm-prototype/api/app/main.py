@@ -1,12 +1,23 @@
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import text
 
 from .db import engine
 from .importer import import_csv
+from .map_routes import router as map_router
 from .pm_engine import discover_dfg, get_variants
 
 app = FastAPI(title="NADJA PM API", version="0.1.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(map_router)
 
 
 class DfgRequest(BaseModel):
