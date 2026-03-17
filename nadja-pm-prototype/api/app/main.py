@@ -7,6 +7,7 @@ from .db import engine
 from .importer import import_csv
 from .map_routes import router as map_router
 from .pm_engine import discover_dfg, get_variants
+from .task_routes import router as task_router
 
 app = FastAPI(title="NADJA PM API", version="0.1.0")
 
@@ -18,6 +19,7 @@ app.add_middleware(
 )
 
 app.include_router(map_router)
+app.include_router(task_router)
 
 
 class DfgRequest(BaseModel):

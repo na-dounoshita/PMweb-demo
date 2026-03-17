@@ -2,7 +2,6 @@ import csv
 import io
 import json
 import os
-from collections import deque
 
 import pandas as pd
 import plotly.express as px
@@ -16,7 +15,7 @@ PUBLIC_API_URL = os.environ.get("PUBLIC_API_URL", "http://localhost:8000")
 st.set_page_config(page_title="NADJA PM", page_icon="📊", layout="wide")
 st.sidebar.title("NADJA Process Mining")
 
-page = st.sidebar.radio("ページ選択", ["CSVアップロード", "プロセスマップ", "業務マッピング", "KPIダッシュボード"])
+page = st.sidebar.radio("ページ選択", ["CSVアップロード", "プロセスマップ", "タスクマイニング", "プロセスマップα", "KPIダッシュボード"])
 
 
 def format_duration(seconds: float | None) -> str:
@@ -35,23 +34,6 @@ def format_duration(seconds: float | None) -> str:
     else:
         d, h = int(seconds // 86400), int((seconds % 86400) // 3600)
         return f"{d}日{h}時間"
-
-
-def duration_color(value: float, min_val: float, max_val: float) -> str:
-    """所要時間を青(速い)→黄→赤(遅い)のグラデーションに変換"""
-    if max_val <= min_val:
-        return "#2196F3"
-    t = (value - min_val) / (max_val - min_val)
-    if t < 0.5:
-        r = int(33 + (255 - 33) * (t * 2))
-        g = int(150 + (193 - 150) * (t * 2))
-        b = int(243 + (7 - 243) * (t * 2))
-    else:
-        t2 = (t - 0.5) * 2
-        r = int(255 - (255 - 244) * t2)
-        g = int(193 - (193 - 67) * t2)
-        b = int(7 - (7 - 54) * t2)
-    return f"#{r:02x}{g:02x}{b:02x}"
 
 
 def get_processes():
@@ -128,12 +110,26 @@ elif page == "プロセスマップ":
         selected = st.selectbox("プロセス選択", list(options.keys()))
         process_id = options[selected]
 
+        # 表示レベル切替
+        st.sidebar.divider()
+        dfg_level = st.sidebar.radio(
+            "表示レベル", ["ウィンドウレベル", "タスクレベル"],
+            help="タスクレベル: タスクマイニングでタグ付けした業務タスク単位でDFGを表示",
+        )
+
         try:
-            resp = requests.post(
-                f"{API_URL}/api/v1/discover/dfg",
-                json={"process_id": process_id},
-                timeout=30,
-            )
+            if dfg_level == "タスクレベル":
+                resp = requests.post(
+                    f"{API_URL}/api/v1/tasks/discover/dfg",
+                    json={"process_id": process_id},
+                    timeout=30,
+                )
+            else:
+                resp = requests.post(
+                    f"{API_URL}/api/v1/discover/dfg",
+                    json={"process_id": process_id},
+                    timeout=30,
+                )
             resp.raise_for_status()
             dfg = resp.json()
 
@@ -154,6 +150,9 @@ elif page == "プロセスマップ":
                 )
                 show_duration = st.sidebar.checkbox("所要時間を表示", value=True)
                 highlight_critical = st.sidebar.checkbox("クリティカルパス強調", value=False)
+                layout_direction = st.sidebar.radio(
+                    "レイアウト方向", ["上→下", "左→右"], horizontal=True
+                )
 
                 # フィルタ適用
                 filtered_edges = [e for e in edges if e["count"] >= min_freq]
@@ -181,192 +180,336 @@ elif page == "プロセスマップ":
                 if not active_nodes:
                     active_nodes = {n["name"] for n in dfg["nodes"]}
 
-                # --- BFSでノードレベル計算（LRレイアウト用） ---
-                adjacency: dict[str, list[str]] = {}
-                for e in filtered_edges:
-                    adjacency.setdefault(e["from"], []).append(e["to"])
+                # --- Cytoscape.js + Dagre でプロセスマップ描画 ---
+                rank_dir = "TB" if layout_direction == "上→下" else "LR"
 
-                node_levels: dict[str, int] = {}
-                queue: deque[str] = deque()
-                for s in start_acts:
-                    if s in active_nodes:
-                        node_levels[s] = 0
-                        queue.append(s)
-
-                while queue:
-                    current = queue.popleft()
-                    for neighbor in adjacency.get(current, []):
-                        if neighbor not in node_levels:
-                            node_levels[neighbor] = node_levels[current] + 1
-                            queue.append(neighbor)
-
-                for n in active_nodes:
-                    if n not in node_levels:
-                        node_levels[n] = 0
-
-                # レベルからx/y座標を計算
-                level_groups: dict[int, list[str]] = {}
-                for name, level in node_levels.items():
-                    level_groups.setdefault(level, []).append(name)
-
-                LEVEL_SEP = 350
-                NODE_SEP = 150
-                node_positions: dict[str, tuple[int, int]] = {}
-                for level, names in level_groups.items():
-                    x = level * LEVEL_SEP
-                    total_height = (len(names) - 1) * NODE_SEP
-                    start_y = -total_height // 2
-                    for i, name in enumerate(names):
-                        node_positions[name] = (x, start_y + i * NODE_SEP)
-
-                # --- vis.js データ構築 ---
-                node_colors = {
-                    "start_end": {"background": "#FF9800", "border": "#E65100"},
-                    "start": {"background": "#4CAF50", "border": "#2E7D32"},
-                    "end": {"background": "#F44336", "border": "#C62828"},
-                    "middle": {"background": "#78909C", "border": "#546E7A"},
-                }
-                max_node_count = max((n["count"] for n in dfg["nodes"]), default=1)
-
-                vis_nodes = []
+                # ノード・エッジデータをJSON化
+                cy_nodes = []
                 for node in dfg["nodes"]:
                     name = node["name"]
                     if name not in active_nodes:
                         continue
-                    count = node["count"]
-
-                    if name in start_acts and name in end_acts:
-                        color = node_colors["start_end"]
-                        node_type = "開始+終了"
-                    elif name in start_acts:
-                        color = node_colors["start"]
-                        node_type = "開始"
-                    elif name in end_acts:
-                        color = node_colors["end"]
-                        node_type = "終了"
-                    else:
-                        color = node_colors["middle"]
-                        node_type = "中間"
-
-                    pos = node_positions.get(name, (0, 0))
-                    vis_nodes.append({
+                    node_type = "startEnd" if (name in start_acts and name in end_acts) \
+                        else "start" if name in start_acts \
+                        else "end" if name in end_acts \
+                        else "mid"
+                    cy_nodes.append({
                         "id": name,
-                        "label": f"{name}\n({count})",
-                        "x": pos[0],
-                        "y": pos[1],
-                        "fixed": True,
-                        "color": color,
-                        "shape": "box",
-                        "borderWidth": 2,
-                        "font": {"size": 14, "color": "#FFFFFF"},
-                        "title": f"アクティビティ: {name}\n実行回数: {count}\n種類: {node_type}",
+                        "label": f"{name}\n({node['count']})",
+                        "count": node["count"],
+                        "nodeType": node_type,
                     })
 
-                # 双方向エッジ検出
-                edge_set = {(e["from"], e["to"]) for e in filtered_edges}
+                max_edge_count_filtered = max((e["count"] for e in filtered_edges), default=1)
 
-                vis_edges = []
+                cy_edges = []
                 for edge in filtered_edges:
-                    count = edge["count"]
-                    avg_dur = edge.get("avg_duration_sec")
-                    width = max(1.0, 8.0 * count / max_edge_count)
-
-                    if avg_dur is not None:
-                        edge_color = duration_color(avg_dur, min_dur, max_dur)
-                    else:
-                        edge_color = "#999999"
-
                     is_critical = (edge["from"], edge["to"]) in critical_set
-                    if highlight_critical and not is_critical:
-                        edge_color = "#DDDDDD"
-                        width = max(1.0, width * 0.5)
-                    elif is_critical:
-                        width = min(width + 3, 12)
-
-                    if show_duration and avg_dur is not None:
-                        label = f"{count} ({format_duration(avg_dur)})"
-                    else:
-                        label = str(count)
-
-                    tooltip = (
-                        f"{edge['from']} → {edge['to']}\n"
-                        f"頻度: {count}回\n"
-                        f"平均所要時間: {format_duration(avg_dur) if avg_dur else 'N/A'}"
-                    )
-
-                    # 双方向エッジはカーブで分離（両方CWでfrom/to反転により逆方向にカーブ）
-                    reverse = (edge["to"], edge["from"])
-                    if reverse in edge_set:
-                        smooth = {"type": "curvedCW", "roundness": 0.4}
-                    else:
-                        smooth = {"type": "curvedCW", "roundness": 0.15}
-
-                    vis_edges.append({
-                        "from": edge["from"],
-                        "to": edge["to"],
-                        "label": label,
-                        "width": width,
-                        "color": {"color": edge_color},
-                        "arrows": "to",
-                        "font": {"size": 11, "align": "horizontal", "background": "white"},
-                        "smooth": smooth,
-                        "title": tooltip,
+                    cy_edges.append({
+                        "source": edge["from"],
+                        "target": edge["to"],
+                        "count": edge["count"],
+                        "avgDur": edge.get("avg_duration_sec"),
+                        "width": max(1, (edge["count"] / max_edge_count_filtered) * 6),
+                        "isCritical": is_critical,
                     })
 
-                # vis.js HTML直接生成（pyvis不使用）
-                nodes_json = json.dumps(vis_nodes, ensure_ascii=False)
-                edges_json = json.dumps(vis_edges, ensure_ascii=False)
+                nodes_json = json.dumps(cy_nodes, ensure_ascii=False)
+                edges_json = json.dumps(cy_edges, ensure_ascii=False)
+                show_dur_js = "true" if show_duration else "false"
+                highlight_crit_js = "true" if highlight_critical else "false"
+
                 vis_html = f"""<!DOCTYPE html>
 <html><head>
 <meta charset="utf-8">
-<script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.28.1/cytoscape.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dagre/0.8.5/dagre.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/cytoscape-dagre@2.5.0/cytoscape-dagre.min.js"></script>
 <style>
-  html, body {{ margin:0; padding:0; width:100%; height:100%; overflow:hidden; }}
-  #graph {{ width:100%; height:620px; }}
+  html, body {{ margin:0; padding:0; width:100%; height:100%; overflow:hidden; font-family:system-ui,-apple-system,sans-serif; }}
+  #cy-container {{ width:100%; height:640px; position:relative; }}
+  #tooltip {{
+    position:absolute; display:none;
+    background:var(--st-color-background, #ffffff);
+    border:1px solid rgba(0,0,0,0.12);
+    border-radius:8px; padding:10px 14px;
+    font-size:13px; font-family:system-ui,-apple-system,sans-serif;
+    pointer-events:none; z-index:10;
+    max-width:260px; line-height:1.6;
+    box-shadow:0 2px 8px rgba(0,0,0,0.08);
+  }}
+  #legend {{
+    display:flex; gap:14px; font-size:12px; padding:8px 12px;
+    flex-wrap:wrap; align-items:center;
+  }}
 </style>
 </head><body>
-<div id="graph"></div>
+<div id="cy-container"></div>
+<div id="tooltip"></div>
+<div id="legend"></div>
 <script>
-document.addEventListener("DOMContentLoaded", function() {{
-  var nodes = new vis.DataSet({nodes_json});
-  var edges = new vis.DataSet({edges_json});
-  var container = document.getElementById("graph");
-  var options = {{
-    layout: {{ hierarchical: false }},
-    physics: {{ enabled: false }},
-    edges: {{
-      font: {{ align: "horizontal" }}
+(function() {{
+  var dk = matchMedia('(prefers-color-scheme: dark)').matches;
+
+  var COLORS = {{
+    startEnd: {{
+      bg: dk ? '#042C53' : '#E6F1FB',
+      border: dk ? '#85B7EB' : '#185FA5',
+      text: dk ? '#B5D4F4' : '#042C53'
     }},
-    interaction: {{
-      hover: true,
-      zoomView: true,
-      dragView: true,
-      dragNodes: true,
-      tooltipDelay: 100
+    start: {{
+      bg: dk ? '#04342C' : '#E1F5EE',
+      border: dk ? '#5DCAA5' : '#0F6E56',
+      text: dk ? '#9FE1CB' : '#04342C'
+    }},
+    end: {{
+      bg: dk ? '#4A1B0C' : '#FAECE7',
+      border: dk ? '#F0997B' : '#993C1D',
+      text: dk ? '#F5C4B3' : '#4A1B0C'
+    }},
+    mid: {{
+      bg: dk ? '#2C2C2A' : '#F1EFE8',
+      border: dk ? '#B4B2A9' : '#5F5E5A',
+      text: dk ? '#D3D1C7' : '#2C2C2A'
     }}
   }};
-  var network = new vis.Network(container, {{nodes: nodes, edges: edges}}, options);
-  network.once("afterDrawing", function() {{
-    network.fit({{ animation: false }});
+
+  var edgeBase = dk ? 'rgba(160,158,150,0.55)' : 'rgba(95,94,90,0.4)';
+
+  function durColor(d, minD, maxD) {{
+    if (maxD <= minD) return 'rgb(15,110,166)';
+    var t = (d - minD) / (maxD - minD);
+    var r, g, b;
+    if (t < 0.5) {{
+      var u = t * 2;
+      r = Math.round(15 + (186 - 15) * u);
+      g = Math.round(110 + (117 - 110) * u);
+      b = Math.round(166 + (23 - 166) * u);
+    }} else {{
+      var u = (t - 0.5) * 2;
+      r = Math.round(186 + (153 - 186) * u);
+      g = Math.round(117 + (60 - 117) * u);
+      b = Math.round(23 + (13 - 23) * u);
+    }}
+    return 'rgb(' + r + ',' + g + ',' + b + ')';
+  }}
+
+  var rawNodes = {nodes_json};
+  var rawEdges = {edges_json};
+  var showDuration = {show_dur_js};
+  var highlightCritical = {highlight_crit_js};
+  var rankDir = '{rank_dir}';
+
+  var durations = rawEdges.map(function(e) {{ return e.avgDur; }}).filter(function(d) {{ return d != null; }});
+  var minDur = durations.length ? Math.min.apply(null, durations) : 0;
+  var maxDur = durations.length ? Math.max.apply(null, durations) : 0;
+
+  function fmtDur(s) {{
+    if (s == null) return '';
+    s = Math.abs(s);
+    if (s < 60) return Math.round(s) + '秒';
+    var m = Math.floor(s / 60), sec = Math.round(s % 60);
+    if (s < 3600) return sec > 0 ? m + '分' + sec + '秒' : m + '分';
+    var h = Math.floor(s / 3600), mm = Math.floor((s % 3600) / 60);
+    return h + '時間' + mm + '分';
+  }}
+
+  var elements = [];
+
+  rawNodes.forEach(function(n) {{
+    var c = COLORS[n.nodeType];
+    elements.push({{ data: {{
+      id: n.id,
+      label: n.label,
+      bgColor: c.bg,
+      borderColor: c.border,
+      textColor: c.text,
+      count: n.count,
+      nodeType: n.nodeType
+    }}}});
   }});
-}});
+
+  rawEdges.forEach(function(e, i) {{
+    var edgeColor = edgeBase;
+    var w = e.width;
+    var label = '' + e.count;
+
+    if (showDuration && e.avgDur != null) {{
+      edgeColor = durColor(e.avgDur, minDur, maxDur);
+      label = e.count + ' (' + fmtDur(e.avgDur) + ')';
+    }}
+
+    if (highlightCritical) {{
+      if (e.isCritical) {{
+        w = Math.min(w + 3, 12);
+      }} else {{
+        edgeColor = dk ? 'rgba(80,80,78,0.3)' : '#DDDDDD';
+        w = Math.max(1, w * 0.5);
+      }}
+    }}
+
+    elements.push({{ data: {{
+      id: 'e' + i,
+      source: e.source,
+      target: e.target,
+      count: e.count,
+      avgDur: e.avgDur,
+      width: w,
+      edgeColor: edgeColor,
+      edgeLabel: label,
+      isCritical: e.isCritical
+    }}}});
+  }});
+
+  var cyStyle = [
+    {{
+      selector: 'node',
+      style: {{
+        'label': 'data(label)',
+        'text-wrap': 'wrap',
+        'text-valign': 'center',
+        'text-halign': 'center',
+        'font-size': '12px',
+        'font-family': 'system-ui, -apple-system, sans-serif',
+        'font-weight': 500,
+        'color': 'data(textColor)',
+        'background-color': 'data(bgColor)',
+        'border-color': 'data(borderColor)',
+        'border-width': 1.5,
+        'shape': 'roundrectangle',
+        'width': 'label',
+        'height': 'label',
+        'padding': '14px',
+        'text-max-width': '120px'
+      }}
+    }},
+    {{
+      selector: 'node:active',
+      style: {{ 'overlay-opacity': 0.08 }}
+    }},
+    {{
+      selector: 'edge',
+      style: {{
+        'width': 'data(width)',
+        'line-color': 'data(edgeColor)',
+        'target-arrow-color': 'data(edgeColor)',
+        'target-arrow-shape': 'triangle',
+        'arrow-scale': 0.8,
+        'curve-style': 'bezier',
+        'label': 'data(edgeLabel)',
+        'font-size': '10px',
+        'font-family': 'system-ui, -apple-system, sans-serif',
+        'color': dk ? '#B4B2A9' : '#5F5E5A',
+        'text-background-color': dk ? '#1a1a18' : '#ffffff',
+        'text-background-opacity': 0.85,
+        'text-background-padding': '3px',
+        'text-background-shape': 'roundrectangle',
+        'edge-text-rotation': 'autorotate',
+        'text-margin-y': -8
+      }}
+    }},
+    {{
+      selector: 'edge:active',
+      style: {{ 'overlay-opacity': 0.06 }}
+    }}
+  ];
+
+  var cy = cytoscape({{
+    container: document.getElementById('cy-container'),
+    elements: elements,
+    style: cyStyle,
+    layout: {{
+      name: 'dagre',
+      rankDir: rankDir,
+      nodeSep: rankDir === 'TB' ? 70 : 60,
+      rankSep: rankDir === 'TB' ? 100 : 120,
+      edgeSep: 30,
+      animate: false,
+      padding: 30
+    }},
+    userZoomingEnabled: true,
+    userPanningEnabled: true,
+    boxSelectionEnabled: false
+  }});
+
+  // ツールチップ
+  var tooltip = document.getElementById('tooltip');
+
+  cy.on('mouseover', 'node', function(e) {{
+    var d = e.target.data();
+    var typeLabel = {{
+      startEnd: '開始+終了', start: '開始', end: '終了', mid: '中間'
+    }}[d.nodeType];
+    tooltip.innerHTML =
+      '<div style="font-weight:500;margin-bottom:4px;">' + d.id + '</div>' +
+      '<div style="display:flex;justify-content:space-between;gap:16px;">' +
+        '<span style="opacity:0.6;">実行回数</span>' +
+        '<span style="font-weight:500;">' + d.count + '回</span>' +
+      '</div>' +
+      '<div style="display:flex;justify-content:space-between;gap:16px;">' +
+        '<span style="opacity:0.6;">種類</span>' +
+        '<span style="font-weight:500;">' + typeLabel + '</span>' +
+      '</div>';
+    if (dk) {{
+      tooltip.style.background = '#2C2C2A';
+      tooltip.style.color = '#D3D1C7';
+      tooltip.style.borderColor = 'rgba(255,255,255,0.12)';
+    }}
+    tooltip.style.display = 'block';
+  }});
+
+  cy.on('mouseover', 'edge', function(e) {{
+    var d = e.target.data();
+    tooltip.innerHTML =
+      '<div style="font-weight:500;margin-bottom:4px;">' + d.source + ' → ' + d.target + '</div>' +
+      '<div style="display:flex;justify-content:space-between;gap:16px;">' +
+        '<span style="opacity:0.6;">頻度</span>' +
+        '<span style="font-weight:500;">' + d.count + '回</span>' +
+      '</div>' +
+      '<div style="display:flex;justify-content:space-between;gap:16px;">' +
+        '<span style="opacity:0.6;">平均所要時間</span>' +
+        '<span style="font-weight:500;">' + (d.avgDur != null ? fmtDur(d.avgDur) : 'N/A') + '</span>' +
+      '</div>';
+    if (dk) {{
+      tooltip.style.background = '#2C2C2A';
+      tooltip.style.color = '#D3D1C7';
+      tooltip.style.borderColor = 'rgba(255,255,255,0.12)';
+    }}
+    tooltip.style.display = 'block';
+    e.target.style({{ 'width': Math.max(d.width * 1.8, 3), 'z-index': 999 }});
+  }});
+
+  cy.on('mousemove', function(e) {{
+    if (tooltip.style.display === 'block') {{
+      var rect = document.getElementById('cy-container').getBoundingClientRect();
+      var px = e.originalEvent.clientX - rect.left + 12;
+      var py = e.originalEvent.clientY - rect.top - 10;
+      tooltip.style.left = Math.min(px, rect.width - 270) + 'px';
+      tooltip.style.top = py + 'px';
+    }}
+  }});
+
+  cy.on('mouseout', 'node, edge', function(e) {{
+    tooltip.style.display = 'none';
+    if (e.target.isEdge()) {{
+      e.target.style({{ 'width': e.target.data('width') }});
+    }}
+  }});
+
+  // 凡例
+  var legend = document.getElementById('legend');
+  var legendColor = dk ? '#D3D1C7' : '#2C2C2A';
+  legend.style.color = legendColor;
+  legend.innerHTML =
+    '<span><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:' + COLORS.start.border + ';margin-right:3px;vertical-align:middle;"></span> 開始</span>' +
+    '<span><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:' + COLORS.end.border + ';margin-right:3px;vertical-align:middle;"></span> 終了</span>' +
+    '<span><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:' + COLORS.startEnd.border + ';margin-right:3px;vertical-align:middle;"></span> 開始+終了</span>' +
+    '<span><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:' + COLORS.mid.border + ';margin-right:3px;vertical-align:middle;"></span> 中間</span>' +
+    '<span>| ホバーで詳細表示 ・ ノードはドラッグ移動可</span>';
+}})();
 </script>
 </body></html>"""
-                components.html(vis_html, height=650, scrolling=False)
-
-                # 凡例
-                st.markdown(
-                    """
-                    <div style="display:flex; gap:16px; flex-wrap:wrap; padding:8px 0; font-size:14px;">
-                        <span><span style="background:#4CAF50; color:white; padding:2px 8px; border-radius:4px;">■</span> 開始</span>
-                        <span><span style="background:#F44336; color:white; padding:2px 8px; border-radius:4px;">■</span> 終了</span>
-                        <span><span style="background:#FF9800; color:white; padding:2px 8px; border-radius:4px;">■</span> 開始+終了</span>
-                        <span><span style="background:#78909C; color:white; padding:2px 8px; border-radius:4px;">■</span> 中間</span>
-                        <span>｜ エッジ色: <span style="color:#2196F3;">■</span>速い → <span style="color:#FFC107;">■</span>中間 → <span style="color:#F44336;">■</span>遅い</span>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+                components.html(vis_html, height=700, scrolling=False)
 
         except requests.exceptions.HTTPError as e:
             detail = e.response.json().get("detail", str(e)) if e.response else str(e)
@@ -375,10 +518,237 @@ document.addEventListener("DOMContentLoaded", function() {{
             st.error(f"通信エラー: {e}")
 
 
-# ===== ページ3: 業務マッピング =====
+# ===== ページ3: タスクマイニング =====
 
-elif page == "業務マッピング":
-    st.header("業務マッピング")
+elif page == "タスクマイニング":
+    st.header("タスクマイニング")
+
+    processes = get_processes()
+    if not processes:
+        st.info("プロセスが登録されていません。先にCSVをアップロードしてください。")
+    else:
+        proc_options = {p["process_name"]: p["process_id"] for p in processes}
+        selected_proc = st.sidebar.selectbox("プロセス選択", list(proc_options.keys()), key="task_proc")
+        task_process_id = proc_options[selected_proc]
+
+        tab_def, tab_tag = st.tabs(["タスク定義", "イベントタグ付け"])
+
+        # --- Tab 1: タスク定義管理 ---
+        with tab_def:
+            st.subheader("タスク定義")
+
+            # 既存タスク定義一覧
+            try:
+                defs_resp = requests.get(
+                    f"{API_URL}/api/v1/tasks/definitions",
+                    params={"process_id": task_process_id}, timeout=10,
+                )
+                defs_resp.raise_for_status()
+                task_defs = defs_resp.json()
+            except Exception:
+                task_defs = []
+
+            if task_defs:
+                for td in task_defs:
+                    col1, col2, col3, col4 = st.columns([1, 3, 2, 1])
+                    color_badge = f'<span style="background:{td["color"] or "#78909C"}; color:white; padding:2px 8px; border-radius:4px;">{td["task_name"]}</span>'
+                    col1.markdown(color_badge, unsafe_allow_html=True)
+                    col2.text(td.get("description") or "")
+                    col3.text(f"ID: {td['task_id']}")
+                    if col4.button("削除", key=f"del_def_{td['task_id']}"):
+                        try:
+                            del_resp = requests.delete(
+                                f"{API_URL}/api/v1/tasks/definitions/{td['task_id']}", timeout=10,
+                            )
+                            del_resp.raise_for_status()
+                            st.success("削除しました")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"削除エラー: {e}")
+            else:
+                st.info("タスク定義がありません。下のフォームから作成してください。")
+
+            st.divider()
+            st.subheader("新規タスク定義")
+            with st.form("new_task_def"):
+                new_name = st.text_input("タスク名", placeholder="例: 受注処理")
+                new_desc = st.text_input("説明（任意）", placeholder="例: メール確認からスプレッドシート入力まで")
+                new_color = st.color_picker("色", value="#4CAF50")
+                submitted = st.form_submit_button("作成")
+                if submitted and new_name:
+                    try:
+                        resp = requests.post(
+                            f"{API_URL}/api/v1/tasks/definitions",
+                            json={
+                                "process_id": task_process_id,
+                                "task_name": new_name,
+                                "description": new_desc or None,
+                                "color": new_color,
+                            },
+                            timeout=10,
+                        )
+                        resp.raise_for_status()
+                        st.success(resp.json().get("message", "作成しました"))
+                        st.rerun()
+                    except requests.exceptions.HTTPError as e:
+                        detail = e.response.json().get("detail", str(e)) if e.response else str(e)
+                        st.error(detail)
+
+        # --- Tab 2: イベントタグ付け ---
+        with tab_tag:
+            st.subheader("イベントタグ付け")
+
+            # タスク定義がなければ警告
+            if not task_defs:
+                try:
+                    defs_resp2 = requests.get(
+                        f"{API_URL}/api/v1/tasks/definitions",
+                        params={"process_id": task_process_id}, timeout=10,
+                    )
+                    defs_resp2.raise_for_status()
+                    task_defs = defs_resp2.json()
+                except Exception:
+                    task_defs = []
+
+            if not task_defs:
+                st.warning("先に「タスク定義」タブでタスクを定義してください。")
+            else:
+                # ケース一覧取得
+                try:
+                    cases_resp = requests.get(
+                        f"{API_URL}/api/v1/tasks/cases",
+                        params={"process_id": task_process_id}, timeout=10,
+                    )
+                    cases_resp.raise_for_status()
+                    cases = cases_resp.json()
+                except Exception:
+                    cases = []
+
+                if not cases:
+                    st.info("イベントデータがありません。")
+                else:
+                    case_labels = {
+                        f"{c['case_id']} ({c['tagged_count']}/{c['event_count']}タグ済)": c["case_id"]
+                        for c in cases
+                    }
+                    selected_case_label = st.selectbox("ケース選択", list(case_labels.keys()))
+                    selected_case_id = case_labels[selected_case_label]
+
+                    # 選択ケースのタグ率
+                    case_info = next(c for c in cases if c["case_id"] == selected_case_id)
+                    tag_pct = round(case_info["tagged_count"] / case_info["event_count"] * 100) if case_info["event_count"] > 0 else 0
+                    st.metric("タグ率", f"{tag_pct}% ({case_info['tagged_count']}/{case_info['event_count']})")
+
+                    # イベント一覧取得
+                    try:
+                        events_resp = requests.get(
+                            f"{API_URL}/api/v1/tasks/events",
+                            params={"process_id": task_process_id, "case_id": selected_case_id},
+                            timeout=10,
+                        )
+                        events_resp.raise_for_status()
+                        events_data = events_resp.json()
+                    except Exception:
+                        events_data = []
+
+                    if events_data:
+                        # イベントテーブル表示（色付き）
+                        df_events = pd.DataFrame(events_data)
+                        display_df = df_events[["row_num", "activity_name", "event_timestamp", "source_system", "task_name"]].copy()
+                        display_df.columns = ["#", "Activity", "Timestamp", "Source", "タスク"]
+                        display_df["タスク"] = display_df["タスク"].fillna("(未分類)")
+
+                        # 色付きスタイル
+                        task_colors = {td["task_name"]: td.get("color", "#78909C") for td in task_defs}
+
+                        def highlight_task(row):
+                            task = row["タスク"]
+                            if task == "(未分類)":
+                                return [""] * len(row)
+                            color = task_colors.get(task, "#78909C")
+                            return [f"background-color: {color}22; border-left: 3px solid {color}"] * len(row)
+
+                        styled = display_df.style.apply(highlight_task, axis=1)
+                        st.dataframe(styled, use_container_width=True, hide_index=True, height=400)
+
+                        # --- タグ付けフォーム ---
+                        st.divider()
+                        st.subheader("タグ付け")
+                        col_start, col_end, col_task = st.columns(3)
+                        max_row = len(events_data)
+                        start_row = col_start.number_input("開始行 #", min_value=1, max_value=max_row, value=1, key="tag_start")
+                        end_row = col_end.number_input("終了行 #", min_value=1, max_value=max_row, value=min(2, max_row), key="tag_end")
+                        task_options = {td["task_name"]: td["task_id"] for td in task_defs}
+                        selected_task_name = col_task.selectbox("タスク", list(task_options.keys()), key="tag_task")
+
+                        if st.button("タグ付け"):
+                            if start_row > end_row:
+                                st.error("開始行は終了行以下にしてください")
+                            else:
+                                ev_start = events_data[start_row - 1]["event_id"]
+                                ev_end = events_data[end_row - 1]["event_id"]
+                                try:
+                                    tag_resp = requests.post(
+                                        f"{API_URL}/api/v1/tasks/tag",
+                                        json={
+                                            "task_id": task_options[selected_task_name],
+                                            "case_id": selected_case_id,
+                                            "process_id": task_process_id,
+                                            "event_id_start": ev_start,
+                                            "event_id_end": ev_end,
+                                        },
+                                        timeout=10,
+                                    )
+                                    tag_resp.raise_for_status()
+                                    st.success(tag_resp.json().get("message", "タグ付けしました"))
+                                    st.rerun()
+                                except requests.exceptions.HTTPError as e:
+                                    detail = e.response.json().get("detail", str(e)) if e.response else str(e)
+                                    st.error(detail)
+
+                        # --- タグ済み一覧 ---
+                        tagged_events = [e for e in events_data if e["task_name"] is not None]
+                        if tagged_events:
+                            st.divider()
+                            st.subheader("タグ済み一覧")
+                            # タスクインスタンスごとにグループ表示
+                            try:
+                                tags_resp = requests.get(
+                                    f"{API_URL}/api/v1/tasks/tag",
+                                    params={"process_id": task_process_id, "case_id": selected_case_id},
+                                    timeout=10,
+                                )
+                                tags_resp.raise_for_status()
+                                tags_list = tags_resp.json()
+                            except Exception:
+                                tags_list = []
+
+                            for tag in tags_list:
+                                col_info, col_del = st.columns([5, 1])
+                                color = tag.get("color", "#78909C")
+                                badge = f'<span style="background:{color}; color:white; padding:2px 8px; border-radius:4px;">{tag["task_name"]}</span>'
+                                # 行番号を逆引き
+                                start_idx = next((e["row_num"] for e in events_data if e["event_id"] == tag["event_id_start"]), "?")
+                                end_idx = next((e["row_num"] for e in events_data if e["event_id"] == tag["event_id_end"]), "?")
+                                col_info.markdown(
+                                    f'{badge} &nbsp; #{start_idx}〜#{end_idx} ({tag["event_count"]}件)',
+                                    unsafe_allow_html=True,
+                                )
+                                if col_del.button("解除", key=f"untag_{tag['task_instance_id']}"):
+                                    try:
+                                        del_resp = requests.delete(
+                                            f"{API_URL}/api/v1/tasks/tag/{tag['task_instance_id']}", timeout=10,
+                                        )
+                                        del_resp.raise_for_status()
+                                        st.rerun()
+                                    except Exception as e:
+                                        st.error(f"解除エラー: {e}")
+
+
+# ===== ページ4: プロセスマップα =====
+
+elif page == "プロセスマップα":
+    st.header("プロセスマップα")
 
     processes = get_processes()
     if not processes:

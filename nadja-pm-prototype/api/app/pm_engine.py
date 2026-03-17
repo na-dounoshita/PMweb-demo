@@ -93,6 +93,106 @@ def discover_dfg(engine, process_id: int) -> dict:
     }
 
 
+def load_task_event_log(engine, process_id: int) -> pd.DataFrame:
+    """タスクレベルのイベントログを構築する。
+
+    タグ付きイベント → task_name をアクティビティとする
+    未タグの連続イベント → 「その他」としてまとめる
+    """
+    # 全イベント取得
+    events_query = """
+        SELECT e.event_id, e.case_id, e.activity_name, e.event_timestamp
+        FROM event e
+        WHERE e.process_id = %(process_id)s
+        ORDER BY e.case_id, e.event_timestamp, e.event_id
+    """
+    events_df = pd.read_sql(events_query, engine, params={"process_id": process_id})
+    if events_df.empty:
+        return pd.DataFrame()
+
+    # タスクインスタンス取得
+    tasks_query = """
+        SELECT ti.case_id, ti.event_id_start, ti.event_id_end,
+               td.task_name, ti.task_start, ti.task_end
+        FROM task_instance ti
+        JOIN task_definition td ON ti.task_id = td.task_id
+        WHERE ti.process_id = %(process_id)s
+        ORDER BY ti.case_id, ti.task_start
+    """
+    tasks_df = pd.read_sql(tasks_query, engine, params={"process_id": process_id})
+
+    # event_id → task_name マッピング
+    event_task: dict[int, str] = {}
+    if not tasks_df.empty:
+        for _, t in tasks_df.iterrows():
+            for eid in range(int(t["event_id_start"]), int(t["event_id_end"]) + 1):
+                event_task[eid] = t["task_name"]
+
+    # ケースごとにタスクレベルのログを構築
+    rows: list[dict] = []
+    for case_id, group in events_df.groupby("case_id", sort=False):
+        prev_label: str | None = None
+        for _, evt in group.iterrows():
+            label = event_task.get(int(evt["event_id"]), "その他")
+            if label != prev_label:
+                rows.append({
+                    "case_id": case_id,
+                    "activity_name": label,
+                    "event_timestamp": evt["event_timestamp"],
+                })
+                prev_label = label
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    df = pm4py.format_dataframe(
+        df,
+        case_id="case_id",
+        activity_key="activity_name",
+        timestamp_key="event_timestamp",
+    )
+    return df
+
+
+def discover_task_dfg(engine, process_id: int) -> dict:
+    """タスクレベルのDFGを生成する"""
+    df = load_task_event_log(engine, process_id)
+    if df.empty:
+        return {"nodes": [], "edges": [], "start_activities": [], "end_activities": [], "critical_path_edges": []}
+
+    freq_dfg, start_acts, end_acts = pm4py.discover_dfg(df)
+    perf_dfg, _, _ = pm4py.discover_performance_dfg(df)
+
+    activity_counts = df["activity_name"].value_counts().to_dict()
+    nodes = [{"name": name, "count": count} for name, count in activity_counts.items()]
+
+    edges = []
+    for (src, dst), count in freq_dfg.items():
+        avg_dur = None
+        perf_val = perf_dfg.get((src, dst))
+        if perf_val is not None:
+            if isinstance(perf_val, dict):
+                perf_val = perf_val.get("mean", 0)
+            avg_dur = round(float(perf_val), 1)
+        edges.append({
+            "from": src,
+            "to": dst,
+            "count": count,
+            "avg_duration_sec": avg_dur,
+        })
+
+    critical_path = _compute_critical_path(freq_dfg, start_acts, end_acts)
+
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "start_activities": list(start_acts.keys()),
+        "end_activities": list(end_acts.keys()),
+        "critical_path_edges": critical_path,
+    }
+
+
 def get_variants(engine, process_id: int) -> dict:
     """バリアント一覧を取得する"""
     df = load_event_log(engine, process_id)

@@ -66,8 +66,8 @@ def save_map(req: MapSaveRequest):
             conn.execute(
                 text(
                     "UPDATE process_map "
-                    "SET nodes = :nodes::jsonb, edges = :edges::jsonb, "
-                    "    metadata = :meta::jsonb, source = :source, "
+                    "SET nodes = CAST(:nodes AS jsonb), edges = CAST(:edges AS jsonb), "
+                    "    metadata = CAST(:meta AS jsonb), source = :source, "
                     "    updated_at = NOW() "
                     "WHERE map_id = :mid"
                 ),
@@ -85,7 +85,7 @@ def save_map(req: MapSaveRequest):
                 text(
                     "INSERT INTO process_map "
                     "(process_id, map_name, source, nodes, edges, metadata) "
-                    "VALUES (:pid, :name, :source, :nodes::jsonb, :edges::jsonb, :meta::jsonb) "
+                    "VALUES (:pid, :name, :source, CAST(:nodes AS jsonb), CAST(:edges AS jsonb), CAST(:meta AS jsonb)) "
                     "RETURNING map_id"
                 ),
                 {
