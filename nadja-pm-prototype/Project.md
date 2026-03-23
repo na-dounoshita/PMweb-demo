@@ -29,6 +29,7 @@ nadja-pm-prototype/
 │       ├── main.py             # FastAPIエンドポイント（5本 + マップAPI + タスクAPI）
 │       ├── db.py               # SQLAlchemy接続
 │       ├── importer.py         # CSVインポートロジック
+│       ├── converter.py        # UIAMログ→PM形式変換
 │       ├── pm_engine.py        # pm4py分析ラッパー + タスクレベルDFG
 │       ├── map_routes.py       # プロセスマップαCRUD API
 │       └── task_routes.py      # タスクマイニングAPI（定義・タグ付け・DFG）
@@ -213,6 +214,7 @@ docker compose down -v
 
 - CSVにCaseIDカラムが無い場合、タイムギャップ閾値（分単位、UI上で選択可能）でケースIDを自動生成。閾値を超える間隔があると新しいケースとして分割
 - CSVの固定3カラム（CaseID, Activity, Timestamp）のうち、CaseIDは任意。Activity, Timestamp以外は `event_attrs JSONB` に格納。カラム追加時にスキーマ変更不要
+- UIアクティビティモニター（NADJA Logger等）の生ログCSV（Timestamp, EventType, ProcessName, WindowTitle, ...）を変換インポート可能。連続する同一ProcessNameイベントを1アクティビティセッションに集約し、ProcessName→Activity名マッピングはUI上で編集可能
 - 同一プロセスへの再アップロードは既存データを削除して上書き（プロトタイプ仕様）
 - Streamlitコンテナにpm4pyは不要。APIが返すJSONからvis.js (CDN) でインタラクティブグラフを描画
 - PostgreSQLの `healthcheck` + `condition: service_healthy` でAPI起動順序を保証

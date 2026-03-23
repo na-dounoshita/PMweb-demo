@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import text
 
+from .converter import convert_uiam_log, detect_uiam_format, get_unique_activity_keys
 from .db import engine
 from .importer import import_csv
 from .map_routes import router as map_router
@@ -61,6 +62,101 @@ async def upload_csv(
         raise HTTPException(status_code=400, detail=str(e))
 
     return result
+
+
+# --- 1b. UIアクティビティモニターログ変換+インポート ---
+
+
+@app.post("/api/v1/upload/convert-uiam")
+async def upload_uiam(
+    file: UploadFile = File(...),
+    process_name: str = Form(...),
+    time_gap_minutes: int | None = Form(None),
+    activity_map_json: str | None = Form(None),
+    min_duration: int = Form(0),
+):
+    """UIアクティビティモニターログを変換してインポートする。"""
+    if not file.filename or not file.filename.endswith(".csv"):
+        raise HTTPException(status_code=400, detail="CSVファイルを指定してください")
+
+    import io
+    import json
+
+    import pandas as pd
+
+    contents = await file.read()
+
+    try:
+        df = pd.read_csv(io.BytesIO(contents), encoding="utf-8-sig")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"CSV読み込みエラー: {e}")
+
+    # activity_map を解析
+    activity_map = None
+    if activity_map_json:
+        try:
+            activity_map = json.loads(activity_map_json)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="activity_map_json が不正なJSONです")
+
+    try:
+        converted = convert_uiam_log(df, activity_map=activity_map, min_duration=min_duration)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # 変換結果を CSV bytes に変換して既存 import_csv に渡す
+    csv_buffer = io.BytesIO()
+    converted.to_csv(csv_buffer, index=False, encoding="utf-8-sig")
+    csv_bytes = csv_buffer.getvalue()
+
+    try:
+        result = import_csv(engine, csv_bytes, process_name, time_gap_minutes=time_gap_minutes)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    result["message"] = f"UIAMログ変換+インポート完了（{len(converted)}セッション）"
+    return result
+
+
+@app.post("/api/v1/preview/convert-uiam")
+async def preview_uiam(
+    file: UploadFile = File(...),
+    activity_map_json: str | None = Form(None),
+    min_duration: int = Form(0),
+):
+    """UIアクティビティモニターログの変換プレビューを返す。"""
+    import io
+    import json
+
+    import pandas as pd
+
+    contents = await file.read()
+
+    try:
+        df = pd.read_csv(io.BytesIO(contents), encoding="utf-8-sig")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"CSV読み込みエラー: {e}")
+
+    activity_map = None
+    if activity_map_json:
+        try:
+            activity_map = json.loads(activity_map_json)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="activity_map_json が不正なJSONです")
+
+    try:
+        converted = convert_uiam_log(df, activity_map=activity_map, min_duration=min_duration)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # ユニークなアクティビティキー一覧（マッピング編集用）
+    activity_keys = get_unique_activity_keys(df)
+
+    return {
+        "total_sessions": len(converted),
+        "preview": converted.head(20).to_dict(orient="records"),
+        "activity_keys": activity_keys,
+    }
 
 
 # --- 2. DFG生成 ---

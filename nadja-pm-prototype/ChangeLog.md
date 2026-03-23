@@ -4,6 +4,23 @@
 
 ---
 
+## 2026-03-18
+
+### やったこと
+
+- UIアクティビティモニターログ（L2粒度）→ プロセスマイニングCSV変換機能を追加
+  - `api/app/converter.py` 新規作成: 連続する同一ProcessNameイベントをアクティビティセッションに集約、Duration算出、ProcessName→Activity名マッピング、Source（Browser/Window）自動判定
+  - `api/app/main.py`: 2エンドポイント追加（`/api/v1/upload/convert-uiam` 変換+インポート一体型、`/api/v1/preview/convert-uiam` プレビュー）
+  - `streamlit/app.py`: CSVアップロードページにラジオボタンで「UIアクティビティモニターログ」モードを追加。マッピング編集（`st.data_editor`）・変換プレビュー・最小セッション秒数フィルタ機能付き
+
+### 現在の状態
+
+- CSVアップロードページが2モード対応: 標準CSV / UIアクティビティモニターログ
+- UIAMログをアップロードすると、ProcessName→Activity名変換・Duration計算を経て既存のインポートパイプライン（CaseID自動生成含む）に流れる
+- マッピングはUI上で編集可能、変換プレビューでインポート前に結果確認可能
+
+---
+
 ## 2026-03-17 (2)
 
 ### やったこと

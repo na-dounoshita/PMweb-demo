@@ -15,7 +15,7 @@ PUBLIC_API_URL = os.environ.get("PUBLIC_API_URL", "http://localhost:8000")
 st.set_page_config(page_title="NADJA PM", page_icon="📊", layout="wide")
 st.sidebar.title("NADJA Process Mining")
 
-page = st.sidebar.radio("ページ選択", ["CSVアップロード", "プロセスマップ", "タスクマイニング", "プロセスマップα", "KPIダッシュボード"])
+page = st.sidebar.radio("ページ選択", ["CSVアップロード", "プロセスマップ", "タスクマイニング", "KPIダッシュボード"])
 
 
 def format_duration(seconds: float | None) -> str:
@@ -53,36 +53,95 @@ if page == "CSVアップロード":
 
     st.info("アップロードしたデータはデータベースに保存されます。同じプロセス名で再アップロードすると既存データは上書きされます。")
 
-    uploaded_file = st.file_uploader("CSVファイルを選択", type=["csv"])
-    process_name = st.text_input("プロセス名", placeholder="例: 営業事務")
+    # --- UIアクティビティモニターログモード ---
+    st.caption("UIアクティビティモニターが出力した生ログCSV（Timestamp, EventType, ProcessName, ...）を変換してインポートします。")
 
-    time_gap_minutes = None
-    if uploaded_file is not None:
-        header_df = pd.read_csv(io.BytesIO(uploaded_file.getvalue()), encoding="utf-8-sig", nrows=0)
-        has_case_id = "CaseID" in header_df.columns
+    uiam_file = st.file_uploader("UIAMログCSVを選択", type=["csv"], key="uiam_csv")
+    uiam_process_name = st.text_input("プロセス名", placeholder="例: 営業事務", key="uiam_pname")
+    uiam_time_gap = st.number_input(
+        "タイムギャップ閾値（分）",
+        min_value=1,
+        max_value=1440,
+        value=30,
+        step=5,
+        help="この時間以上の間隔があると新しいケースとして分割されます",
+        key="uiam_gap",
+    )
+    uiam_min_duration = st.number_input(
+        "最小セッション秒数（これ未満を除外）",
+        min_value=0,
+        max_value=600,
+        value=0,
+        step=1,
+        help="0なら全セッションを含めます",
+        key="uiam_min_dur",
+    )
 
-        if not has_case_id:
-            st.warning("CSVにCaseIDカラムがありません。タイムギャップ閾値を指定してケースIDを自動生成します。")
-            time_gap_minutes = st.number_input(
-                "タイムギャップ閾値（分）",
-                min_value=1,
-                max_value=1440,
-                value=30,
-                step=5,
-                help="この時間以上の間隔があると新しいケースとして分割されます",
-            )
+    # マッピング編集 & プレビュー
+    activity_map_json = None
+    if uiam_file is not None:
+        raw_df = pd.read_csv(io.BytesIO(uiam_file.getvalue()), encoding="utf-8-sig", nrows=0)
+        expected_cols = {"Timestamp", "EventType", "ProcessName", "WindowTitle"}
+        if not expected_cols.issubset(set(raw_df.columns)):
+            st.error(f"UIAMログ形式ではありません。必須カラム: {expected_cols}")
         else:
-            st.info("CaseIDカラムが検出されました。既存のケースIDを使用します。")
+            with st.expander("アクティビティ名マッピング設定", expanded=False):
+                st.caption("ProcessName → Activity名 の変換ルールを編集できます。")
+                # プレビューAPIでユニークProcessName一覧を取得
+                try:
+                    preview_resp = requests.post(
+                        f"{API_URL}/api/v1/preview/convert-uiam",
+                        files={"file": ("log.csv", uiam_file.getvalue(), "text/csv")},
+                        data={"min_duration": str(uiam_min_duration)},
+                        timeout=60,
+                    )
+                    preview_resp.raise_for_status()
+                    preview_data = preview_resp.json()
 
-    if st.button("アップロード", disabled=not (uploaded_file and process_name)):
-        with st.spinner("インポート中..."):
-            files = {"file": (uploaded_file.name, uploaded_file.getvalue(), "text/csv")}
-            data = {"process_name": process_name}
-            if time_gap_minutes is not None:
-                data["time_gap_minutes"] = str(time_gap_minutes)
+                    if preview_data.get("activity_keys"):
+                        mapping_df = pd.DataFrame(preview_data["activity_keys"])
+                        edited_mapping = st.data_editor(
+                            mapping_df,
+                            column_config={
+                                "ActivityKey": st.column_config.TextColumn("識別キー", disabled=True, help="browser:Slack = Chrome内のSlack"),
+                                "Activity": st.column_config.TextColumn("Activity名"),
+                            },
+                            use_container_width=True,
+                            hide_index=True,
+                            key="uiam_mapping_editor",
+                        )
+                        # 編集結果をJSON化
+                        activity_map_json = json.dumps(
+                            dict(zip(edited_mapping["ActivityKey"], edited_mapping["Activity"])),
+                            ensure_ascii=False,
+                        )
+
+                    # プレビュー表示
+                    st.subheader(f"変換プレビュー（全{preview_data['total_sessions']}セッション）")
+                    if preview_data.get("preview"):
+                        st.dataframe(pd.DataFrame(preview_data["preview"]), use_container_width=True)
+                    else:
+                        st.warning("変換結果が空です。")
+
+                except requests.exceptions.HTTPError as e:
+                    detail = e.response.json().get("detail", str(e)) if e.response else str(e)
+                    st.error(f"プレビューエラー: {detail}")
+                except Exception as e:
+                    st.error(f"プレビュー通信エラー: {e}")
+
+    if st.button("変換してインポート", disabled=not (uiam_file and uiam_process_name), key="uiam_upload"):
+        with st.spinner("変換+インポート中..."):
+            files = {"file": (uiam_file.name, uiam_file.getvalue(), "text/csv")}
+            data = {
+                "process_name": uiam_process_name,
+                "time_gap_minutes": str(uiam_time_gap),
+                "min_duration": str(uiam_min_duration),
+            }
+            if activity_map_json:
+                data["activity_map_json"] = activity_map_json
             try:
                 resp = requests.post(
-                    f"{API_URL}/api/v1/upload/csv", files=files, data=data, timeout=60
+                    f"{API_URL}/api/v1/upload/convert-uiam", files=files, data=data, timeout=120
                 )
                 resp.raise_for_status()
                 result = resp.json()
